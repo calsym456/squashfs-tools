@@ -1,0 +1,21 @@
+Source: squashfs-tools
+Section: kernel
+Priority: optional
+Maintainer: Deepin Developer <deepin-dev@deepin.org>
+Build-Depends:
+ debhelper-compat (= 13), libattr1-dev, liblzma-dev, liblzo2-dev, liblz4-dev, zlib1g-dev, libzstd-dev
+Standards-Version: 4.5.1
+Homepage: https://github.com/plougher/squashfs-tools
+
+Package: squashfs-tools
+Architecture: linux-any kfreebsd-any
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: Tool to create and append to squashfs filesystems
+ Squashfs is a highly compressed read-only filesystem for Linux. It uses zlib
+ compression to compress both files, inodes and directories. Inodes in the
+ system are very small and all blocks are packed to minimise data overhead.
+ Block sizes greater than 4K are supported up to a maximum of 64K.
+ .
+ Squashfs is intended for general read-only filesystem use, for archival use
+ (i.e. in cases where a .tar.gz file may be used), and in constrained block
+ device/memory systems (e.g. embedded systems) where low overhead is needed.
