@@ -1,3 +1,9 @@
+squashfs-tools (1:4.7-0deepin1) stable; urgency=medium
+
+  * New upstream release
+
+ -- April Lu <apr3vau@outlook.com>  Wed, 25 Jun 2025 18:35:00 +0800
+
 squashfs-tools (1:4.5-deepin) stable; urgency=medium
 
   * ['Rebuild  against by  current gcc 11.2']

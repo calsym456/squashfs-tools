@@ -1,9 +1,10 @@
-#ifndef SQUASHFS_COMPAT
-#define SQUASHFS_COMPAT
+#ifndef SQUASHFS_COMPAT_H
+#define SQUASHFS_COMPAT_H
 /*
  * Squashfs
  *
- * Copyright (c) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2014, 2019
+ * Copyright (c) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2012,
+ * 2014, 2019, 2022, 2024
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -28,8 +29,7 @@
  */
 
 #define SQUASHFS_CHECK			2
-#define SQUASHFS_CHECK_DATA(flags)		SQUASHFS_BIT(flags, \
-						SQUASHFS_CHECK)
+#define SQUASHFS_CHECK_DATA(flags)	SQUASHFS_BIT(flags, SQUASHFS_CHECK)
 
 /* Max number of uids and gids */
 #define SQUASHFS_UIDS			256

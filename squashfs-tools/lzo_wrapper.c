@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2014, 2021
+ * Copyright (c) 2012, 2013, 2014, 2021, 2022, 2024, 2025
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -30,6 +30,8 @@
 #include "squashfs_fs.h"
 #include "lzo_wrapper.h"
 #include "compressor.h"
+#include "print_pager.h"
+#include "alloc.h"
 
 static struct lzo_algorithm lzo[] = {
 	{ "lzo1x_1", LZO1X_1_MEM_COMPRESS, lzo1x_1_compress },
@@ -317,23 +319,10 @@ static int squashfs_lzo_init(void **strm, int block_size, int datablock)
 {
 	struct lzo_stream *stream;
 
-	stream = *strm = malloc(sizeof(struct lzo_stream));
-	if(stream == NULL)
-		goto failed;
-
-	stream->workspace = malloc(lzo[algorithm].size);
-	if(stream->workspace == NULL)
-		goto failed2;
-
-	stream->buffer = malloc(LZO_MAX_EXPANSION(block_size));
-	if(stream->buffer != NULL)
-		return 0;
-
-	free(stream->workspace);
-failed2:
-	free(stream);
-failed:
-	return -1;
+	stream = *strm = MALLOC(sizeof(struct lzo_stream));
+	stream->workspace = MALLOC(lzo[algorithm].size);
+	stream->buffer = MALLOC(LZO_MAX_EXPANSION(block_size));
+	return 0;
 }
 
 
@@ -391,21 +380,22 @@ static int lzo_uncompress(void *dest, void *src, int size, int outsize,
 }
 
 
-static void lzo_usage(FILE *stream)
+static void lzo_usage(FILE *stream, int cols)
 {
 	int i;
 
-	fprintf(stream, "\t  -Xalgorithm <algorithm>\n");
-	fprintf(stream, "\t\tWhere <algorithm> is one of:\n");
+	autowrap_print(stream, "\t  -Xalgorithm <algorithm>\n", cols);
+	autowrap_print(stream, "\t\tWhere <algorithm> is one of:\n", cols);
 
 	for(i = 0; lzo[i].name; i++)
-		fprintf(stream, "\t\t\t%s%s\n", lzo[i].name,
+		autowrap_printf(stream, cols, "\t\t\t%s%s\n", lzo[i].name,
 				i == SQUASHFS_LZO1X_999 ? " (default)" : "");
 
-	fprintf(stream, "\t  -Xcompression-level <compression-level>\n");
-	fprintf(stream, "\t\t<compression-level> should be 1 .. 9 (default "
-		"%d)\n", SQUASHFS_LZO1X_999_COMP_DEFAULT);
-	fprintf(stream, "\t\tOnly applies to lzo1x_999 algorithm\n");
+	autowrap_print(stream, "\t  -Xcompression-level <compression-level>\n",
+		cols);
+	autowrap_printf(stream, cols, "\t\t<compression-level> should be 1 .. "
+		"9 (default %d).  Only applies to lzo1x_999 algorithm\n",
+		SQUASHFS_LZO1X_999_COMP_DEFAULT);
 }
 
 
@@ -423,6 +413,16 @@ int lzo1x_999_wrapper(const lzo_bytep src, lzo_uint src_len, lzo_bytep dst,
 }
 
 
+static int option_args(char *option)
+{
+	if(strcmp(option, "-Xalgorithm") == 0 ||
+				strcmp(option, "-Xcompression-level") == 0)
+		return 1;
+
+	return 0;
+}
+
+
 struct compressor lzo_comp_ops = {
 	.init = squashfs_lzo_init,
 	.compress = lzo_compress,
@@ -433,6 +433,7 @@ struct compressor lzo_comp_ops = {
 	.extract_options = lzo_extract_options,
 	.display_options = lzo_display_options,
 	.usage = lzo_usage,
+	.option_args = option_args,
 	.id = LZO_COMPRESSION,
 	.name = "lzo",
 	.supported = 1

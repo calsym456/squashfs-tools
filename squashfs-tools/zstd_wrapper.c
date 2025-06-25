@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2021
+ * Copyright (c) 2017, 2021, 2022, 2024
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -26,6 +26,7 @@
 #include "squashfs_fs.h"
 #include "zstd_wrapper.h"
 #include "compressor.h"
+#include "print_pager.h"
 
 static int compression_level = ZSTD_DEFAULT_COMPRESSION_LEVEL;
 
@@ -51,12 +52,25 @@ static int zstd_options(char *argv[], int argc)
 			fprintf(stderr, "zstd: -Xcompression-level missing "
 				"compression level\n");
 			fprintf(stderr, "zstd: -Xcompression-level it should "
-				"be 1 <= n <= %d\n", ZSTD_maxCLevel());
+				"be %d <= n <= -1 or 1 <= n <= %d\n",
+				ZSTD_minCLevel(), ZSTD_maxCLevel());
 			goto failed;
 		}
 
 		compression_level = atoi(argv[1]);
-		if (compression_level < 1 ||
+		if (compression_level == 0) {
+			fprintf(stderr, "zstd: -Xcompression-level invalid, it "
+				"should be %d <= n <= -1 or 1 <= n <= %d\n",
+				ZSTD_minCLevel(), ZSTD_maxCLevel());
+			goto failed;
+		}
+		if (compression_level < 0 &&
+		    compression_level < ZSTD_minCLevel()) {
+			fprintf(stderr, "zstd: -Xcompression-level invalid, it "
+				"should be %d <= n <= -1\n", ZSTD_minCLevel());
+			goto failed;
+		}
+		if (compression_level > 0 &&
 		    compression_level > ZSTD_maxCLevel()) {
 			fprintf(stderr, "zstd: -Xcompression-level invalid, it "
 				"should be 1 <= n <= %d\n", ZSTD_maxCLevel());
@@ -132,7 +146,8 @@ static int zstd_extract_options(int block_size, void *buffer, int size)
 
 	SQUASHFS_INSWAP_COMP_OPTS(comp_opts);
 
-	if (comp_opts->compression_level < 1 ||
+	if (comp_opts->compression_level == 0 ||
+	    comp_opts->compression_level < ZSTD_minCLevel() ||
 	    comp_opts->compression_level > ZSTD_maxCLevel()) {
 		fprintf(stderr, "zstd: bad compression level in compression "
 			"options structure\n");
@@ -160,7 +175,8 @@ static void zstd_display_options(void *buffer, int size)
 
 	SQUASHFS_INSWAP_COMP_OPTS(comp_opts);
 
-	if (comp_opts->compression_level < 1 ||
+	if (comp_opts->compression_level == 0 ||
+	    comp_opts->compression_level < ZSTD_minCLevel() ||
 	    comp_opts->compression_level > ZSTD_maxCLevel()) {
 		fprintf(stderr, "zstd: bad compression level in compression "
 			"options structure\n");
@@ -232,12 +248,25 @@ static int zstd_uncompress(void *dest, void *src, int size, int outsize,
 	return (int)res;
 }
 
-static void zstd_usage(FILE *stream)
+static void zstd_usage(FILE *stream, int cols)
 {
-	fprintf(stream, "\t  -Xcompression-level <compression-level>\n");
-	fprintf(stream, "\t\t<compression-level> should be 1 .. %d (default "
-		"%d)\n", ZSTD_maxCLevel(), ZSTD_DEFAULT_COMPRESSION_LEVEL);
+	autowrap_print(stream, "\t  -Xcompression-level <compression-level>\n",
+		cols);
+	autowrap_printf(stream, cols, "\t\t<compression-level> should be %d .. "
+		"-1 or 1 .. %d (default %d).  Negative compression levels "
+		"correspond to the zstd --fast option.\n", ZSTD_minCLevel(),
+		ZSTD_maxCLevel(), ZSTD_DEFAULT_COMPRESSION_LEVEL);
 }
+
+
+static int option_args(char *option)
+{
+	if(strcmp(option, "-Xcompression-level") == 0)
+		return 1;
+
+	return 0;
+}
+
 
 struct compressor zstd_comp_ops = {
 	.init = zstd_init,
@@ -248,6 +277,7 @@ struct compressor zstd_comp_ops = {
 	.extract_options = zstd_extract_options,
 	.display_options = zstd_display_options,
 	.usage = zstd_usage,
+	.option_args = option_args,
 	.id = ZSTD_COMPRESSION,
 	.name = "zstd",
 	.supported = 1

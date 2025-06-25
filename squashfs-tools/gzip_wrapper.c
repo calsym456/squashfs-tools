@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2013, 2014, 2021
+ * Copyright (c) 2009, 2010, 2012, 2013, 2014, 2021, 2022, 2024, 2025
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -29,6 +29,8 @@
 #include "squashfs_fs.h"
 #include "gzip_wrapper.h"
 #include "compressor.h"
+#include "print_pager.h"
+#include "alloc.h"
 
 static struct strategy strategy[] = {
 	{ "default", Z_DEFAULT_STRATEGY, 0 },
@@ -341,18 +343,12 @@ static int gzip_init(void **strm, int block_size, int datablock)
 	struct gzip_stream *stream;
 
 	if(!datablock || !strategy_count) {
-		stream = malloc(sizeof(*stream) + sizeof(struct gzip_strategy));
-		if(stream == NULL)
-			goto failed;
-
+		stream = MALLOC(sizeof(*stream) + sizeof(struct gzip_strategy));
 		stream->strategies = 1;
 		stream->strategy[0].strategy = Z_DEFAULT_STRATEGY;
 	} else {
-		stream = malloc(sizeof(*stream) +
+		stream = MALLOC(sizeof(*stream) +
 			sizeof(struct gzip_strategy) * strategy_count);
-		if(stream == NULL)
-			goto failed;
-
 		memset(stream->strategy, 0, sizeof(struct gzip_strategy) *
 			strategy_count);
 
@@ -363,11 +359,8 @@ static int gzip_init(void **strm, int block_size, int datablock)
 				continue;
 
 			stream->strategy[j].strategy = strategy[i].strategy;
-			if(j) {
-				stream->strategy[j].buffer = malloc(block_size);
-				if(stream->strategy[j].buffer == NULL)
-					goto failed2;
-			}
+			if(j)
+				stream->strategy[j].buffer = MALLOC(block_size);
 			j++;
 		}
 	}
@@ -378,17 +371,14 @@ static int gzip_init(void **strm, int block_size, int datablock)
 
 	res = deflateInit2(&stream->stream, compression_level, Z_DEFLATED,
 		window_size, 8, stream->strategy[0].strategy);
-	if(res != Z_OK)
-		goto failed2;
+	if(res == Z_OK) {
+		*strm = stream;
+		return 0;
+	}
 
-	*strm = stream;
-	return 0;
-
-failed2:
 	for(i = 1; i < stream->strategies; i++)
 		free(stream->strategy[i].buffer);
 	free(stream);
-failed:
 	return -1;
 }
 
@@ -421,6 +411,7 @@ static int gzip_compress(void *strm, void *d, void *s, int size, int block_size,
 				goto failed;
 		}
 
+		stream->stream.total_out = 0;
 		res = deflate(&stream->stream, Z_FINISH);
 		strategy->length = stream->stream.total_out;
 		if(res == Z_STREAM_END) {
@@ -467,20 +458,32 @@ static int gzip_uncompress(void *d, void *s, int size, int outsize, int *error)
 }
 
 
-static void gzip_usage(FILE *stream)
+static void gzip_usage(FILE *stream, int cols)
 {
-	fprintf(stream, "\t  -Xcompression-level <compression-level>\n");
-	fprintf(stream, "\t\t<compression-level> should be 1 .. 9 (default "
-		"%d)\n", GZIP_DEFAULT_COMPRESSION_LEVEL);
-	fprintf(stream, "\t  -Xwindow-size <window-size>\n");
-	fprintf(stream, "\t\t<window-size> should be 8 .. 15 (default "
-		"%d)\n", GZIP_DEFAULT_WINDOW_SIZE);
-	fprintf(stream, "\t  -Xstrategy strategy1,strategy2,...,strategyN\n");
-	fprintf(stream, "\t\tCompress using strategy1,strategy2,...,strategyN"
-		" in turn\n");
-	fprintf(stream, "\t\tand choose the best compression.\n");
-	fprintf(stream, "\t\tAvailable strategies: default, filtered, "
-		"huffman_only,\n\t\trun_length_encoded and fixed\n");
+	autowrap_print(stream, "\t  -Xcompression-level <compression-level>\n",
+		cols);
+	autowrap_printf(stream, cols, "\t\t<compression-level> should be 1 .. "
+		"9 (default %d)\n", GZIP_DEFAULT_COMPRESSION_LEVEL);
+	autowrap_print(stream, "\t  -Xwindow-size <window-size>\n", cols);
+	autowrap_printf(stream, cols, "\t\t<window-size> should be 8 .. 15 "
+		"(default %d)\n", GZIP_DEFAULT_WINDOW_SIZE);
+	autowrap_print(stream, "\t  -Xstrategy strategy1,strategy2,...,"
+		"strategyN\n", cols);
+	autowrap_print(stream, "\t\tCompress using strategy1,strategy2,...,"
+		"strategyN in turn and choose the best compression.  Available "
+		"strategies: default, filtered, huffman_only, "
+		"run_length_encoded and fixed\n", cols);
+}
+
+
+static int option_args(char *option)
+{
+	if(strcmp(option, "-Xcompression-level") == 0 ||
+				strcmp(option, "-Xwindow-size") == 0 ||
+				strcmp(option, "-Xstrategy") == 0)
+		return 1;
+
+	return 0;
 }
 
 
@@ -494,6 +497,7 @@ struct compressor gzip_comp_ops = {
 	.extract_options = gzip_extract_options,
 	.display_options = gzip_display_options,
 	.usage = gzip_usage,
+	.option_args = option_args,
 	.id = ZLIB_COMPRESSION,
 	.name = "gzip",
 	.supported = 1

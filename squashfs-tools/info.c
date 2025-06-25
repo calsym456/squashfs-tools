@@ -2,7 +2,7 @@
  * Create a squashfs filesystem.  This is a highly compressed read only
  * filesystem.
  *
- * Copyright (c) 2013, 2014, 2019, 2021
+ * Copyright (c) 2013, 2014, 2019, 2021, 2022, 2023, 2024, 2025
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -42,11 +42,13 @@
 #include "mksquashfs_error.h"
 #include "progressbar.h"
 #include "caches-queues-lists.h"
+#include "signals.h"
+#include "reader.h"
+#include "thread.h"
 
-static int silent = 0;
 static struct dir_ent *ent = NULL;
 
-pthread_t info_thread;
+static pthread_t info_thread;
 
 
 void disable_info()
@@ -61,7 +63,7 @@ void update_info(struct dir_ent *dir_ent)
 }
 
 
-void print_filename()
+static void print_filename()
 {
 	struct dir_ent *dir_ent = ent;
 
@@ -69,25 +71,28 @@ void print_filename()
 		return;
 
 	if(dir_ent->our_dir->subpath[0] != '\0')
-		INFO("%s/%s\n", dir_ent->our_dir->subpath, dir_ent->name);
+		progressbar_info("%s/%s\n", dir_ent->our_dir->subpath, dir_ent->name);
 	else
-		INFO("/%s\n", dir_ent->name);
+		progressbar_info("/%s\n", dir_ent->name);
 }
 
 
-void dump_state()
+static void dump_state()
 {
+	int i, reader_threads;
+	struct reader *reader;
+
 	disable_progress_bar();
 
-	printf("Queue and Cache status dump\n");
-	printf("===========================\n");
+	printf("Queues, caches and threads status dump\n");
+	printf("======================================\n");
 
 	printf("file buffer queue (reader thread -> deflate thread(s))\n");
-	dump_queue(to_deflate);
+	dump_block_read_queue(to_deflate);
 
 	printf("uncompressed fragment queue (reader thread -> fragment"
 						" thread(s))\n");
-	dump_queue(to_process_frag);
+	dump_read_queue(to_process_frag);
 
 	printf("processed fragment queue (fragment thread(s) -> main"
 						" thread)\n");
@@ -100,31 +105,23 @@ void dump_state()
 						" deflate thread(s))\n");
 	dump_queue(to_frag);
 
-	if(!reproducible) {
-		printf("locked frag queue (compressed frags waiting while multi-block"
-							" file is written)\n");
-		dump_queue(locked_fragment);
+	printf("compressed fragment queue (fragment deflate threads(s) ->"
+					"fragment order thread)\n");
 
-		printf("compressed block queue (main & fragment deflate threads(s) ->"
-						" writer thread)\n");
-		dump_queue(to_writer);
-	} else {
-		printf("compressed fragment queue (fragment deflate threads(s) ->"
-						"fragment order thread)\n");
+	dump_seq_queue(to_order, 0);
 
-		dump_seq_queue(to_order, 0);
+	printf("compressed block queue (main & fragment order threads ->"
+					" writer thread)\n");
+	dump_queue(to_writer);
 
-		printf("compressed block queue (main & fragment order threads ->"
-						" writer thread)\n");
-		dump_queue(to_writer);
+	reader = get_readers(&reader_threads);
+	for(i = 0; i < reader_threads; i++) {
+		printf("%s read cache %d (uncompressed blocks read by reader thread %d)\n", reader[i].type, i + 1, i + 1);
+		dump_cache(reader[i].buffer);
 	}
 
-	printf("read cache (uncompressed blocks read by reader thread)\n");
-	dump_cache(reader_buffer);
+	dump_write_cache(bwriter_buffer);
 
-	printf("block write cache (compressed blocks waiting for the writer"
-						" thread)\n");
-	dump_cache(bwriter_buffer);
 	printf("fragment write cache (compressed fragments waiting for the"
 						" writer thread)\n");
 	dump_cache(fwriter_buffer);
@@ -137,14 +134,15 @@ void dump_state()
 						" full in dup check)\n");
 	dump_cache(reserve_cache);
 
+	dump_threads();
+
 	enable_progress_bar();
 }
 
 
-void *info_thrd(void *arg)
+static void *info_thrd(void *arg)
 {
 	sigset_t sigmask;
-	struct timespec timespec = { .tv_sec = 1, .tv_nsec = 0 };
 	int sig, waiting = 0;
 
 	sigemptyset(&sigmask);
@@ -152,26 +150,7 @@ void *info_thrd(void *arg)
 	sigaddset(&sigmask, SIGHUP);
 
 	while(1) {
-		if(waiting)
-			sig = sigtimedwait(&sigmask, NULL, &timespec);
-		else
-			sig = sigwaitinfo(&sigmask, NULL);
-
-		if(sig == -1) {
-			switch(errno) {
-			case EAGAIN:
-				/* interval timed out */
-				waiting = 0;
-				/* FALLTHROUGH */
-			case EINTR:
-				/* if waiting, the wait will be longer, but
-				   that's OK */
-				continue;
-			default:
-				BAD_ERROR("sigtimedwait/sigwaitinfo failed "
-					"because %s\n", strerror(errno));
-			}
-		}
+		sig = wait_for_signal(&sigmask, &waiting);
 
 		if(sig == SIGQUIT && !waiting) {
 			print_filename();
@@ -182,6 +161,8 @@ void *info_thrd(void *arg)
 		} else
 			dump_state();
 	}
+
+	return NULL;
 }
 
 

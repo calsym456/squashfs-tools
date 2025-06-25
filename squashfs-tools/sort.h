@@ -4,7 +4,8 @@
 /*
  * Squashfs
  *
- * Copyright (c) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2013
+ * Copyright (c) 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2012,
+ * 2013, 2024
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -27,6 +28,13 @@
 struct priority_entry {
 	struct dir_ent *dir;
 	struct priority_entry *next;
+};
+
+struct sort_info {
+	dev_t			st_dev;
+	ino_t			st_ino;
+	int			priority;
+	struct sort_info	*next;
 };
 
 extern int read_sort_file(char *, int, char *[]);

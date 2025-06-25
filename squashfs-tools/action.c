@@ -2,7 +2,7 @@
  * Create a squashfs filesystem.  This is a highly compressed read only
  * filesystem.
  *
- * Copyright (c) 2011, 2012, 2013, 2014, 2021
+ * Copyright (c) 2011, 2012, 2013, 2014, 2021, 2022, 2023, 2024, 2025
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -44,6 +44,9 @@
 #include "action.h"
 #include "mksquashfs_error.h"
 #include "fnmatch_compat.h"
+#include "xattr.h"
+#include "symbolic_mode.h"
+#include "alloc.h"
 
 #define TRUE 1
 #define FALSE 0
@@ -59,12 +62,18 @@ static struct action *exclude_spec = NULL;
 static struct action *empty_spec = NULL;
 static struct action *move_spec = NULL;
 static struct action *prune_spec = NULL;
+static struct action *xattr_exc_spec = NULL;
+static struct action *xattr_inc_spec = NULL;
+static struct action *xattr_add_spec = NULL;
 static struct action *other_spec = NULL;
 static int fragment_count = 0;
 static int exclude_count = 0;
 static int empty_count = 0;
 static int move_count = 0;
 static int prune_count = 0;
+static int xattr_exc_count = 0;
+static int xattr_inc_count = 0;
+static int xattr_add_count = 0;
 static int other_count = 0;
 static struct action_entry *parsing_action;
 
@@ -120,11 +129,8 @@ static int read_file(char *filename, char *type, int (parse_line)(char *))
 		while(1) {
 			int len;
 
-			if(total + (MAX_LINE + 1) > size) {
-				line = realloc(line, size += (MAX_LINE + 1));
-				if(line == NULL)
-					MEM_ERROR();
-			}
+			if(total + (MAX_LINE + 1) > size)
+				line = REALLOC(line, size += (MAX_LINE + 1));
 
 			err = fgets(line + total, MAX_LINE + 1, fd);
 			if(err == NULL)
@@ -240,9 +246,7 @@ static int get_token(char **string)
 
 	/* string */
 	if(str == NULL) {
-		str = malloc(STR_SIZE);
-		if(str == NULL)
-			MEM_ERROR();
+		str = MALLOC(STR_SIZE);
 		size = STR_SIZE;
 	}
 
@@ -281,16 +285,11 @@ static int get_token(char **string)
 		}
 
 		if(cur_size + 2 > size) {
-			char *tmp;
+			int offset = str_ptr - str;
 
 			size = (cur_size + 1  + STR_SIZE) & ~(STR_SIZE - 1);
-
-			tmp = realloc(str, size);
-			if(tmp == NULL)
-				MEM_ERROR();
-
-			str_ptr = str_ptr - str + tmp;
-			str = tmp;
+			str = REALLOC(str, size);
+			str_ptr = str + offset;
 		}
 
 		*str_ptr ++ = *cur_ptr ++;
@@ -346,10 +345,7 @@ static struct expr *create_expr(struct expr *lhs, int op, struct expr *rhs)
 		return NULL;
 	}
 
-	expr = malloc(sizeof(*expr));
-	if (expr == NULL)
-		MEM_ERROR();
-
+	expr = MALLOC(sizeof(*expr));
 	expr->type = OP_TYPE;
 	expr->expr_op.lhs = lhs;
 	expr->expr_op.rhs = rhs;
@@ -366,10 +362,7 @@ static struct expr *create_unary_op(struct expr *lhs, int op)
 	if (lhs == NULL)
 		return NULL;
 
-	expr = malloc(sizeof(*expr));
-	if (expr == NULL)
-		MEM_ERROR();
-
+	expr = MALLOC(sizeof(*expr));
 	expr->type = UNARY_TYPE;
 	expr->unary_op.expr = lhs;
 	expr->unary_op.op = op;
@@ -405,10 +398,7 @@ static struct expr *parse_test(char *name)
 		return NULL;
 	}
 
-	expr = malloc(sizeof(*expr));
-	if (expr == NULL)
-		MEM_ERROR();
-
+	expr = MALLOC(sizeof(*expr));
 	expr->type = ATOM_TYPE;
 
 	expr->atom.test = test;
@@ -441,11 +431,8 @@ static struct expr *parse_test(char *name)
 			goto failed;
 		}
 
-		argv = realloc(argv, (args + 1) * sizeof(char *));
-		if (argv == NULL)
-			MEM_ERROR();
-
-		argv[args ++ ] = strdup(string);
+		argv = REALLOC(argv, (args + 1) * sizeof(char *));
+		argv[args ++ ] = STRDUP(string);
 
 		token = get_token(&string);
 
@@ -612,11 +599,8 @@ int parse_action(char *s, int verbose)
 			goto failed;
 		}
 
-		argv = realloc(argv, (args + 1) * sizeof(char *));
-		if (argv == NULL)
-			MEM_ERROR();
-
-		argv[args ++] = strdup(string);
+		argv = REALLOC(argv, (args + 1) * sizeof(char *));
+		argv[args ++] = STRDUP(string);
 
 		token = get_token(&string);
 
@@ -687,15 +671,25 @@ skip_args:
 		spec_count = prune_count ++;
 		spec_list = &prune_spec;
 		break;
+	case XATTR_EXC_ACTION:
+		spec_count = xattr_exc_count ++;
+		spec_list = &xattr_exc_spec;
+		break;
+	case XATTR_INC_ACTION:
+		spec_count = xattr_inc_count ++;
+		spec_list = &xattr_inc_spec;
+		break;
+	case XATTR_ADD_ACTION:
+		spec_count = xattr_add_count ++;
+		spec_list = &xattr_add_spec;
+		break;
 	default:
 		spec_count = other_count ++;
 		spec_list = &other_spec;
 	}
 	
-	*spec_list = realloc(*spec_list, (spec_count + 1) *
+	*spec_list = REALLOC(*spec_list, (spec_count + 1) *
 					sizeof(struct action));
-	if (*spec_list == NULL)
-		MEM_ERROR();
 
 	(*spec_list)[spec_count].type = action->type;
 	(*spec_list)[spec_count].action = action;
@@ -724,7 +718,7 @@ failed:
 #define LOG_PRINT	2
 #define LOG_ENABLED	3
 
-char *_expr_log(char *string, int cmnd)
+static char *_expr_log(char *string, int cmnd)
 {
 	static char *expr_msg = NULL;
 	static int cur_size = 0, alloc_size = 0;
@@ -732,7 +726,7 @@ char *_expr_log(char *string, int cmnd)
 
 	switch(cmnd) {
 	case LOG_ENABLE:
-		expr_msg = malloc(ALLOC_SZ);
+		expr_msg = MALLOC(ALLOC_SZ);
 		alloc_size = ALLOC_SZ;
 		cur_size = 0;
 		return expr_msg;
@@ -755,9 +749,7 @@ char *_expr_log(char *string, int cmnd)
 		/* buffer too small, expand */
 		alloc_size = (cur_size + size + ALLOC_SZ - 1) & ~(ALLOC_SZ - 1);
 
-		expr_msg = realloc(expr_msg, alloc_size);
-		if(expr_msg == NULL)
-			MEM_ERROR();
+		expr_msg = REALLOC(expr_msg, alloc_size);
 	}
 
 	memcpy(expr_msg + cur_size, string, size);
@@ -767,19 +759,19 @@ char *_expr_log(char *string, int cmnd)
 }
 
 
-char *expr_log_cmnd(int cmnd)
+static char *expr_log_cmnd(int cmnd)
 {
 	return _expr_log(NULL, cmnd);
 }
 
 
-char *expr_log(char *string)
+static char *expr_log(char *string)
 {
 	return _expr_log(string, LOG_PRINT);
 }
 
 
-void expr_log_atom(struct atom *atom)
+static void expr_log_atom(struct atom *atom)
 {
 	int i;
 
@@ -800,7 +792,7 @@ void expr_log_atom(struct atom *atom)
 }
 
 
-void expr_log_match(int match)
+static void expr_log_match(int match)
 {
 	if(match)
 		expr_log("=True");
@@ -918,25 +910,25 @@ static int eval_expr_top(struct action *action, struct action_data *action_data)
  * 
  * Blank lines and comment lines indicated by # are supported.
  */
-int parse_action_true(char *s)
+static int parse_action_true(char *s)
 {
 	return parse_action(s, ACTION_LOG_TRUE);
 }
 
 
-int parse_action_false(char *s)
+static int parse_action_false(char *s)
 {
 	return parse_action(s, ACTION_LOG_FALSE);
 }
 
 
-int parse_action_verbose(char *s)
+static int parse_action_verbose(char *s)
 {
 	return parse_action(s, ACTION_LOG_VERBOSE);
 }
 
 
-int parse_action_nonverbose(char *s)
+static int parse_action_nonverbose(char *s)
 {
 	return parse_action(s, ACTION_LOG_NONE);
 }
@@ -1003,8 +995,8 @@ void eval_actions(struct dir_info *root, struct dir_ent *dir_ent)
 	int st_mode = dir_ent->inode->buf.st_mode;
 
 	action_data.name = dir_ent->name;
-	action_data.pathname = strdup(pathname(dir_ent));
-	action_data.subpath = strdup(subpathname(dir_ent));
+	action_data.pathname = STRDUP(pathname(dir_ent));
+	action_data.subpath = STRDUP(subpathname(dir_ent));
 	action_data.buf = &dir_ent->inode->buf;
 	action_data.depth = dir_ent->our_dir->depth;
 	action_data.dir_ent = dir_ent;
@@ -1037,8 +1029,8 @@ void *eval_frag_actions(struct dir_info *root, struct dir_ent *dir_ent, int tail
 	struct action_data action_data;
 
 	action_data.name = dir_ent->name;
-	action_data.pathname = strdup(pathname(dir_ent));
-	action_data.subpath = strdup(subpathname(dir_ent));
+	action_data.pathname = STRDUP(pathname(dir_ent));
+	action_data.subpath = STRDUP(subpathname(dir_ent));
 	action_data.buf = &dir_ent->inode->buf;
 	action_data.depth = dir_ent->our_dir->depth;
 	action_data.dir_ent = dir_ent;
@@ -1099,7 +1091,7 @@ int exclude_actions()
 
 
 int eval_exclude_actions(char *name, char *pathname, char *subpath,
-	struct stat *buf, int depth, struct dir_ent *dir_ent)
+	struct stat *buf, unsigned int depth, struct dir_ent *dir_ent)
 {
 	int i, match = 0;
 	struct action_data action_data;
@@ -1229,10 +1221,7 @@ static int parse_uid_args(struct action_entry *action, int args, char **argv,
 	if (uid == -1)
 		return 0;
 
-	uid_info = malloc(sizeof(struct uid_info));
-	if (uid_info == NULL)
-		MEM_ERROR();
-
+	uid_info = MALLOC(sizeof(struct uid_info));
 	uid_info->uid = uid;
 	*data = uid_info;
 
@@ -1250,10 +1239,7 @@ static int parse_gid_args(struct action_entry *action, int args, char **argv,
 	if (gid == -1)
 		return 0;
 
-	gid_info = malloc(sizeof(struct gid_info));
-	if (gid_info == NULL)
-		MEM_ERROR();
-
+	gid_info = MALLOC(sizeof(struct gid_info));
 	gid_info->gid = gid;
 	*data = gid_info;
 
@@ -1275,10 +1261,7 @@ static int parse_guid_args(struct action_entry *action, int args, char **argv,
 	if (gid == -1)
 		return 0;
 
-	guid_info = malloc(sizeof(struct guid_info));
-	if (guid_info == NULL)
-		MEM_ERROR();
-
+	guid_info = MALLOC(sizeof(struct guid_info));
 	guid_info->uid = uid;
 	guid_info->gid = gid;
 	*data = guid_info;
@@ -1317,268 +1300,15 @@ static void guid_action(struct action *action, struct dir_ent *dir_ent)
 /*
  * Mode specific action code
  */
-static int parse_octal_mode_args(int args, char **argv,
-			void **data)
-{
-	int n, bytes;
-	unsigned int mode;
-	struct mode_data *mode_data;
-
-	/* octal mode number? */
-	n = sscanf(argv[0], "%o%n", &mode, &bytes);
-	if (n == 0)
-		return -1; /* not an octal number arg */
-
-
-	/* check there's no trailing junk */
-	if (argv[0][bytes] != '\0') {
-		SYNTAX_ERROR("Unexpected trailing bytes after octal "
-			"mode number\n");
-		return 0; /* bad octal number arg */
-	}
-
-	/* check there's only one argument */
-	if (args > 1) {
-		SYNTAX_ERROR("Octal mode number is first argument, "
-			"expected one argument, got %d\n", args);
-		return 0; /* bad octal number arg */
-	}
-
-	/*  check mode is within range */
-	if (mode > 07777) {
-		SYNTAX_ERROR("Octal mode %o is out of range\n", mode);
-		return 0; /* bad octal number arg */
-	}
-
-	mode_data = malloc(sizeof(struct mode_data));
-	if (mode_data == NULL)
-		MEM_ERROR();
-
-	mode_data->operation = ACTION_MODE_OCT;
-	mode_data->mode = mode;
-	mode_data->next = NULL;
-	*data = mode_data;
-
-	return 1;
-}
-
-
-/*
- * Parse symbolic mode of format [ugoa]*[[+-=]PERMS]+
- * PERMS = [rwxXst]+ or [ugo]
- */
-static int parse_sym_mode_arg(char *arg, struct mode_data **head,
-	struct mode_data **cur)
-{
-	struct mode_data *mode_data;
-	int mode;
-	int mask = 0;
-	int op;
-	char X;
-
-	if (arg[0] != 'u' && arg[0] != 'g' && arg[0] != 'o' && arg[0] != 'a') {
-		/* no ownership specifiers, default to a */
-		mask = 0777;
-		goto parse_operation;
-	}
-
-	/* parse ownership specifiers */
-	while(1) {
-		switch(*arg) {
-		case 'u':
-			mask |= 04700;
-			break;
-		case 'g':
-			mask |= 02070;
-			break;
-		case 'o':
-			mask |= 01007;
-			break;
-		case 'a':
-			mask = 07777;
-			break;
-		default:
-			goto parse_operation;
-		}
-		arg ++;
-	}
-
-parse_operation:
-	/* trap a symbolic mode with just an ownership specification */
-	if(*arg == '\0') {
-		SYNTAX_ERROR("Expected one of '+', '-' or '=', got EOF\n");
-		goto failed;
-	}
-
-	while(*arg != '\0') {
-		mode = 0;
-		X = 0;
-
-		switch(*arg) {
-		case '+':
-			op = ACTION_MODE_ADD;
-			break;
-		case '-':
-			op = ACTION_MODE_REM;
-			break;
-		case '=':
-			op = ACTION_MODE_SET;
-			break;
-		default:
-			SYNTAX_ERROR("Expected one of '+', '-' or '=', got "
-				"'%c'\n", *arg);
-			goto failed;
-		}
-	
-		arg ++;
-	
-		/* Parse PERMS */
-		if (*arg == 'u' || *arg == 'g' || *arg == 'o') {
-	 		/* PERMS = [ugo] */
-			mode = - *arg;
-			arg ++;
-		} else {
-	 		/* PERMS = [rwxXst]* */
-			while(1) {
-				switch(*arg) {
-				case 'r':
-					mode |= 0444;
-					break;
-				case 'w':
-					mode |= 0222;
-					break;
-				case 'x':
-					mode |= 0111;
-					break;
-				case 's':
-					mode |= 06000;
-					break;
-				case 't':
-					mode |= 01000;
-					break;
-				case 'X':
-					X = 1;
-					break;
-				case '+':
-				case '-':
-				case '=':
-				case '\0':
-					mode &= mask;
-					goto perms_parsed;
-				default:
-					SYNTAX_ERROR("Unrecognised permission "
-								"'%c'\n", *arg);
-					goto failed;
-				}
-	
-				arg ++;
-			}
-		}
-	
-perms_parsed:
-		mode_data = malloc(sizeof(*mode_data));
-		if (mode_data == NULL)
-			MEM_ERROR();
-
-		mode_data->operation = op;
-		mode_data->mode = mode;
-		mode_data->mask = mask;
-		mode_data->X = X;
-		mode_data->next = NULL;
-
-		if (*cur) {
-			(*cur)->next = mode_data;
-			*cur = mode_data;
-		} else
-			*head = *cur = mode_data;
-	}
-
-	return 1;
-
-failed:
-	return 0;
-}
-
-
-static int parse_sym_mode_args(struct action_entry *action, int args,
+static int action_parse_mode(struct action_entry *action, int args,
 					char **argv, void **data)
 {
-	int i, res = 1;
-	struct mode_data *head = NULL, *cur = NULL;
-
-	for (i = 0; i < args && res; i++)
-		res = parse_sym_mode_arg(argv[i], &head, &cur);
-
-	*data = head;
-
-	return res;
-}
-
-
-static int parse_mode_args(struct action_entry *action, int args,
-					char **argv, void **data)
-{
-	int res;
-
 	if (args == 0) {
 		SYNTAX_ERROR("Mode action expects one or more arguments\n");
 		return 0;
 	}
 
-	res = parse_octal_mode_args(args, argv, data);
-	if(res >= 0)
-		/* Got an octal mode argument */
-		return res;
-	else  /* not an octal mode argument */
-		return parse_sym_mode_args(action, args, argv, data);
-}
-
-
-static int mode_execute(struct mode_data *mode_data, int st_mode)
-{
-	int mode = 0;
-
-	for (;mode_data; mode_data = mode_data->next) {
-		if (mode_data->mode < 0) {
-			/* 'u', 'g' or 'o' */
-			switch(-mode_data->mode) {
-			case 'u':
-				mode = (st_mode >> 6) & 07;
-				break;
-			case 'g':
-				mode = (st_mode >> 3) & 07;
-				break;
-			case 'o':
-				mode = st_mode & 07;
-				break;
-			}
-			mode = ((mode << 6) | (mode << 3) | mode) &
-				mode_data->mask;
-		} else if (mode_data->X &&
-				((st_mode & S_IFMT) == S_IFDIR ||
-				(st_mode & 0111)))
-			/* X permission, only takes effect if inode is a
-			 * directory or x is set for some owner */
-			mode = mode_data->mode | (0111 & mode_data->mask);
-		else
-			mode = mode_data->mode;
-
-		switch(mode_data->operation) {
-		case ACTION_MODE_OCT:
-			st_mode = (st_mode & S_IFMT) | mode;
-			break;
-		case ACTION_MODE_SET:
-			st_mode = (st_mode & ~mode_data->mask) | mode;
-			break;
-		case ACTION_MODE_ADD:
-			st_mode |= mode;
-			break;
-		case ACTION_MODE_REM:
-			st_mode &= ~mode;
-		}
-	}
-
-	return st_mode;
+	return parse_mode_args(source, cur_ptr, args, argv, data);
 }
 
 
@@ -1622,10 +1352,7 @@ static int parse_empty_args(struct action_entry *action, int args,
 		return 0;
 	}
 
-	empty_data = malloc(sizeof(*empty_data));
-	if (empty_data == NULL)
-		MEM_ERROR();
-
+	empty_data = MALLOC(sizeof(*empty_data));
 	empty_data->val = val;
 	*data = empty_data;
 
@@ -1647,8 +1374,8 @@ int eval_empty_actions(struct dir_info *root, struct dir_ent *dir_ent)
 		return 0;
 
 	action_data.name = dir_ent->name;
-	action_data.pathname = strdup(pathname(dir_ent));
-	action_data.subpath = strdup(subpathname(dir_ent));
+	action_data.pathname = STRDUP(pathname(dir_ent));
+	action_data.subpath = STRDUP(subpathname(dir_ent));
 	action_data.buf = &dir_ent->inode->buf;
 	action_data.depth = dir_ent->our_dir->depth;
 	action_data.dir_ent = dir_ent;
@@ -1701,7 +1428,6 @@ static char *move_pathname(struct move_ent *move)
 {
 	struct dir_info *dest;
 	char *name, *pathname;
-	int res;
 
 	dest = (move->ops & ACTION_MOVE_MOVE) ?
 		move->dest : move->dir_ent->our_dir;
@@ -1709,12 +1435,9 @@ static char *move_pathname(struct move_ent *move)
 		move->name : move->dir_ent->name;
 
 	if(dest->subpath[0] != '\0')
-		res = asprintf(&pathname, "%s/%s", dest->subpath, name);
+		ASPRINTF(&pathname, "%s/%s", dest->subpath, name);
 	else
-		res = asprintf(&pathname, "/%s", name);
-
-	if(res == -1)
-		BAD_ERROR("asprintf failed in move_pathname\n");
+		ASPRINTF(&pathname, "/%s", name);
 
 	return pathname;
 }
@@ -1735,7 +1458,7 @@ static char *get_comp(char **pathname)
 		path ++;
 
 	*pathname = path;
-	return strndup(start, path - start);
+	return STRNDUP(start, path - start);
 }
 
 
@@ -1891,8 +1614,8 @@ void eval_move_actions(struct dir_info *root, struct dir_ent *dir_ent)
 	struct move_ent *move = NULL;
 
 	action_data.name = dir_ent->name;
-	action_data.pathname = strdup(pathname(dir_ent));
-	action_data.subpath = strdup(subpathname(dir_ent));
+	action_data.pathname = STRDUP(pathname(dir_ent));
+	action_data.subpath = STRDUP(subpathname(dir_ent));
 	action_data.buf = &dir_ent->inode->buf;
 	action_data.depth = dir_ent->our_dir->depth;
 	action_data.dir_ent = dir_ent;
@@ -1913,10 +1636,7 @@ void eval_move_actions(struct dir_info *root, struct dir_ent *dir_ent)
 
 		if(match) {
 			if(move == NULL) {
-				move = malloc(sizeof(*move));
-				if(move == NULL)
-					MEM_ERROR();
-
+				move = MALLOC(sizeof(*move));
 				move->ops = 0;
 				move->dir_ent = dir_ent;
 			}
@@ -1984,7 +1704,7 @@ static void move_dir(struct dir_ent *dir_ent)
 
 	/* update our directory's subpath name */
 	free(dir->subpath);
-	dir->subpath = strdup(subpathname(dir_ent));
+	dir->subpath = STRDUP(subpathname(dir_ent));
 
 	/* recursively update the subpaths of any sub-directories */
 	for(comp_ent = dir->list; comp_ent; comp_ent = comp_ent->next)
@@ -2043,7 +1763,7 @@ static void move_file(struct move_ent *move_ent)
 		 * parent directory's pathname to calculate the pathname
 		 */
 		if(dir_ent->nonstandard_pathname == NULL) {
-			dir_ent->nonstandard_pathname = strdup(filename);
+			dir_ent->nonstandard_pathname = STRDUP(filename);
 			if(dir_ent->source_name) {
 				free(dir_ent->source_name);
 				dir_ent->source_name = NULL;
@@ -2115,8 +1835,8 @@ int eval_prune_actions(struct dir_info *root, struct dir_ent *dir_ent)
 	struct action_data action_data;
 
 	action_data.name = dir_ent->name;
-	action_data.pathname = strdup(pathname(dir_ent));
-	action_data.subpath = strdup(subpathname(dir_ent));
+	action_data.pathname = STRDUP(pathname(dir_ent));
+	action_data.subpath = STRDUP(subpathname(dir_ent));
 	action_data.buf = &dir_ent->inode->buf;
 	action_data.depth = dir_ent->our_dir->depth;
 	action_data.dir_ent = dir_ent;
@@ -2129,6 +1849,180 @@ int eval_prune_actions(struct dir_info *root, struct dir_ent *dir_ent)
 	free(action_data.subpath);
 
 	return match;
+}
+
+
+/*
+ * Xattr include/exclude specific action code
+ */
+static int parse_xattr_args(struct action_entry *action, int args,
+					char **argv, void **data)
+{
+	struct xattr_data *xattr_data;
+	int error;
+
+	xattr_data = MALLOC(sizeof(*xattr_data));
+
+	error = regcomp(&xattr_data->preg, argv[0], REG_EXTENDED|REG_NOSUB);
+	if(error) {
+		char str[1024]; /* overflow safe */
+
+		regerror(error, &xattr_data->preg, str, 1024);
+		SYNTAX_ERROR("invalid regex %s because %s\n", argv[0], str);
+		free(xattr_data);
+		return 0;
+	}
+
+	*data = xattr_data;
+
+	return 1;
+}
+
+
+static struct xattr_data *eval_xattr_actions (struct action *spec,
+		int count, struct dir_info *root, struct dir_ent *dir_ent)
+{
+	int i;
+	struct action_data action_data;
+	struct xattr_data *head = NULL;
+
+	if(count == 0)
+		return NULL;
+
+	action_data.name = dir_ent->name;
+	action_data.pathname = STRDUP(pathname(dir_ent));
+	action_data.subpath = STRDUP(subpathname(dir_ent));
+	action_data.buf = &dir_ent->inode->buf;
+	action_data.depth = dir_ent->our_dir->depth;
+	action_data.dir_ent = dir_ent;
+	action_data.root = root;
+
+	for (i = 0; i < count; i++) {
+		struct xattr_data *data = spec[i].data;
+		int match = eval_expr_top(&spec[i], &action_data);
+
+		if(match) {
+			data->next = head;
+			head = data;
+		}
+	}
+
+	free(action_data.pathname);
+	free(action_data.subpath);
+
+	return head;
+}
+
+
+int xattr_exc_actions()
+{
+	return xattr_exc_count;
+}
+
+
+struct xattr_data *eval_xattr_exc_actions (struct dir_info *root,
+					struct dir_ent *dir_ent)
+{
+	return eval_xattr_actions(xattr_exc_spec, xattr_exc_count, root, dir_ent);
+}
+
+
+int match_xattr_exc_actions(struct xattr_data *head, char *name)
+{
+	struct xattr_data *cur;
+
+	for(cur = head; cur != NULL; cur = cur->next) {
+		int match = regexec(&cur->preg, name, (size_t) 0, NULL, 0);
+
+		if(match == 0)
+			return 1;
+	}
+
+	return 0;
+}
+
+
+int xattr_inc_actions()
+{
+	return xattr_inc_count;
+}
+
+
+struct xattr_data *eval_xattr_inc_actions (struct dir_info *root,
+					struct dir_ent *dir_ent)
+{
+	return eval_xattr_actions(xattr_inc_spec, xattr_inc_count, root, dir_ent);
+}
+
+
+int match_xattr_inc_actions(struct xattr_data *head, char *name)
+{
+	if(head == NULL)
+		return 0;
+	else
+		return !match_xattr_exc_actions(head, name);
+}
+
+
+/*
+ * Xattr add specific action code
+ */
+static int parse_xattr_add_args(struct action_entry *action, int args,
+					char **argv, void **data)
+{
+	struct xattr_add *xattr = xattr_parse(argv[0], "", "action xattr add");
+
+	if(xattr == NULL)
+		return 0;
+
+	*data = xattr;
+
+	return 1;
+}
+
+
+struct xattr_add *eval_xattr_add_actions(struct dir_info *root,
+					struct dir_ent *dir_ent, int *items)
+{
+	int i, count = 0;
+	struct action_data action_data;
+	struct xattr_add *head = NULL;
+
+	if(xattr_add_count == 0) {
+		*items = 0;
+		return NULL;
+	}
+
+	action_data.name = dir_ent->name;
+	action_data.pathname = STRDUP(pathname(dir_ent));
+	action_data.subpath = STRDUP(subpathname(dir_ent));
+	action_data.buf = &dir_ent->inode->buf;
+	action_data.depth = dir_ent->our_dir->depth;
+	action_data.dir_ent = dir_ent;
+	action_data.root = root;
+
+	for (i = 0; i < xattr_add_count; i++) {
+		struct xattr_add *data = xattr_add_spec[i].data;
+		int match = eval_expr_top(&xattr_add_spec[i], &action_data);
+
+		if(match) {
+			data->next = head;
+			head = data;
+			count ++;
+		}
+	}
+
+	free(action_data.pathname);
+	free(action_data.subpath);
+
+	*items = count;
+	return head;
+}
+
+
+int xattr_add_actions()
+{
+	return xattr_add_count;
 }
 
 
@@ -2235,10 +2129,7 @@ static int parse_number_arg(struct test_entry *test, struct atom *atom)
 		return 0;
 	}
 
-	number = malloc(sizeof(*number));
-	if (number == NULL)
-		MEM_ERROR();
-
+	number = MALLOC(sizeof(*number));
 	number->range = range;
 	number->size = size;
 
@@ -2280,10 +2171,7 @@ static int parse_range_args(struct test_entry *test, struct atom *atom)
 		return 0;
 	}
  
-	range = malloc(sizeof(*range));
-	if (range == NULL)
-		MEM_ERROR();
-
+	range = MALLOC(sizeof(*range));
 	range->start = start;
 	range->end = end;
 
@@ -2351,14 +2239,10 @@ static int NAME##_fn(struct atom *atom, struct action_data *action_data) \
  */
 static int check_pathname(struct test_entry *test, struct atom *atom)
 {
-	int res;
 	char *name;
 
 	if(atom->argv[0][0] != '/') {
-		res = asprintf(&name, "/%s", atom->argv[0]);
-		if(res == -1)
-			BAD_ERROR("asprintf failed in check_pathname\n");
-
+		ASPRINTF(&name, "/%s", atom->argv[0]);
 		free(atom->argv[0]);
 		atom->argv[0] = name;
 	}
@@ -2412,11 +2296,20 @@ static char *get_start(char *s, int n)
 }
 	
 
-static int subpathname_fn(struct atom *atom, struct action_data *action_data)
+static int subpathname_fn(struct atom *atom, struct action_data *data)
 {
-	return fnmatch(atom->argv[0], get_start(strdupa(action_data->subpath),
-		count_components(atom->argv[0])),
-		FNM_PATHNAME|FNM_EXTMATCH) == 0;
+	char *s = get_start(STRDUP(data->subpath), count_components(atom->argv[0]));
+	int res = fnmatch(atom->argv[0], s, FNM_PATHNAME|FNM_EXTMATCH);
+
+	free(s);
+
+	return res == 0;
+}
+
+/* calculate tailsize */
+static off_t get_tailsize(struct action_data *action_data)
+{
+	return action_data->buf->st_size & (block_size - 1);
 }
 
 /*
@@ -2426,6 +2319,8 @@ static int subpathname_fn(struct atom *atom, struct action_data *action_data)
  * They just take a variable and compare it against a number.
  */
 TEST_VAR_FN(filesize, ACTION_REG, action_data->buf->st_size)
+
+TEST_VAR_FN(tailsize, ACTION_REG, get_tailsize(action_data))
 
 TEST_VAR_FN(dirsize, ACTION_DIR, action_data->buf->st_size)
 
@@ -2446,6 +2341,8 @@ TEST_VAR_FN(dircount, ACTION_DIR, action_data->dir_ent->dir->count)
 TEST_VAR_FN(depth, ACTION_ALL_LNK, action_data->depth)
 
 TEST_VAR_RANGE_FN(filesize, ACTION_REG, action_data->buf->st_size)
+
+TEST_VAR_RANGE_FN(tailsize, ACTION_REG, get_tailsize(action_data))
 
 TEST_VAR_RANGE_FN(dirsize, ACTION_DIR, action_data->buf->st_size)
 
@@ -2491,10 +2388,7 @@ static int parse_user_arg(struct test_entry *test, struct atom *atom)
 		return 0;
 	}
 
-	number = malloc(sizeof(*number));
-	if(number == NULL)
-		MEM_ERROR();
-
+	number = MALLOC(sizeof(*number));
 	number->range = NUM_EQ;
 	number->size = size;
 
@@ -2522,10 +2416,7 @@ static int parse_group_arg(struct test_entry *test, struct atom *atom)
 		return 0;
 	}
 
-	number = malloc(sizeof(*number));
-	if(number == NULL)
-		MEM_ERROR();
-
+	number = MALLOC(sizeof(*number));
 	number->range = NUM_EQ;
 	number->size= size;
 
@@ -2538,7 +2429,7 @@ static int parse_group_arg(struct test_entry *test, struct atom *atom)
 /*
  * Type test specific code
  */
-struct type_entry type_table[] = {
+static struct type_entry type_table[] = {
 	{ S_IFSOCK, 's' },
 	{ S_IFLNK, 'l' },
 	{ S_IFREG, 'f' },
@@ -2605,10 +2496,7 @@ static int false_fn(struct atom *atom, struct action_data *action_data)
 static int parse_file_arg(struct test_entry *test, struct atom *atom)
 {
 	int res;
-	regex_t *preg = malloc(sizeof(regex_t));
-
-	if (preg == NULL)
-		MEM_ERROR();
+	regex_t *preg = MALLOC(sizeof(regex_t));
 
 	res = regcomp(preg, atom->argv[0], REG_EXTENDED);
 	if (res) {
@@ -2663,10 +2551,7 @@ static int file_fn(struct atom *atom, struct action_data *action_data)
 	close(pipefd[1]);
 
 	do {
-		buffer = realloc(buffer, size + 512);
-		if (buffer == NULL)
-			MEM_ERROR();
-
+		buffer = REALLOC(buffer, size + 512);
 		res = read_bytes(pipefd[0], buffer + size, 512);
 
 		if (res == -1)
@@ -2833,10 +2718,12 @@ static struct dir_ent *follow_path(struct dir_info *dir, char *pathname)
 	if(comp) {
 		free(comp);
 		comp = get_comp(&path);
-		free(comp);
-		if(comp != NULL)
+
+		if(comp != NULL) {
 			/* Not a leaf component */
+			free(comp);
 			return NULL;
+		}
 	} else {
 		/* Fully walked pathname, dir_ent contains correct value unless
 		 * we've walked to the parent ("..") in which case we need
@@ -3020,8 +2907,8 @@ static int readlink_fn(struct atom *atom, struct action_data *action_data)
 		goto finish;
 
 	eval_action.name = dir_ent->name;
-	eval_action.pathname = strdup(pathname(dir_ent));
-	eval_action.subpath = strdup(subpathname(dir_ent));
+	eval_action.pathname = STRDUP(pathname(dir_ent));
+	eval_action.subpath = STRDUP(subpathname(dir_ent));
 	eval_action.buf = &dir_ent->inode->buf;
 	eval_action.depth = dir_ent->our_dir->depth;
 	eval_action.dir_ent = dir_ent;
@@ -3122,8 +3009,8 @@ static int eval_fn(struct atom *atom, struct action_data *action_data)
 	}
 
 	eval_action.name = dir_ent->name;
-	eval_action.pathname = strdup(pathname(dir_ent));
-	eval_action.subpath = strdup(subpathname(dir_ent));
+	eval_action.pathname = STRDUP(pathname(dir_ent));
+	eval_action.subpath = STRDUP(subpathname(dir_ent));
 	eval_action.buf = &dir_ent->inode->buf;
 	eval_action.depth = dir_ent->our_dir->depth;
 	eval_action.dir_ent = dir_ent;
@@ -3177,11 +3064,11 @@ static int parse_perm_args(struct test_entry *test, struct atom *atom)
 	}
 
 	/* try to parse as an octal number */
-	res = parse_octal_mode_args(atom->args, atom->argv, (void **) &head);
+	res = parse_octal_mode_args(source, cur_ptr, atom->args, atom->argv, (void **) &head);
 	if(res == -1) {
 		/* parse as sym mode argument */
 		for(i = 0; i < atom->args && res; i++, arg = atom->argv[i])
-			res = parse_sym_mode_arg(arg, &head, &cur);
+			res = parse_sym_mode_arg(source, cur_ptr, arg, &head, &cur);
 	}
 
 	if (res == 0)
@@ -3192,10 +3079,7 @@ static int parse_perm_args(struct test_entry *test, struct atom *atom)
 	 */
 	mode = mode_execute(head, 0);
 
-	perm_data = malloc(sizeof(struct perm_data));
-	if (perm_data == NULL)
-		MEM_ERROR();
-
+	perm_data = MALLOC(sizeof(struct perm_data));
 	perm_data->op = op;
 	perm_data->mode = mode;
 
@@ -3308,6 +3192,7 @@ static struct test_entry test_table[] = {
 	{ "pathname", 1, pathname_fn, check_pathname, 1, 0},
 	{ "subpathname", 1, subpathname_fn, check_pathname, 1, 0},
 	{ "filesize", 1, filesize_fn, parse_number_arg, 1, 0},
+	{ "tailsize", 1, tailsize_fn, parse_number_arg, 1, 0},
 	{ "dirsize", 1, dirsize_fn, parse_number_arg, 1, 0},
 	{ "size", 1, size_fn, parse_number_arg, 1, 0},
 	{ "inode", 1, inode_fn, parse_number_arg, 1, 0},
@@ -3322,6 +3207,7 @@ static struct test_entry test_table[] = {
 	{ "depth", 1, depth_fn, parse_number_arg, 1, 0},
 	{ "dircount", 1, dircount_fn, parse_number_arg, 0, 0},
 	{ "filesize_range", 2, filesize_range_fn, parse_range_args, 1, 0},
+	{ "tailsize_range", 2, tailsize_range_fn, parse_range_args, 1, 0},
 	{ "dirsize_range", 2, dirsize_range_fn, parse_range_args, 1, 0},
 	{ "size_range", 2, size_range_fn, parse_range_args, 1, 0},
 	{ "inode_range", 2, inode_range_fn, parse_range_args, 1, 0},
@@ -3362,11 +3248,14 @@ static struct action_entry action_table[] = {
 	{ "uid", UID_ACTION, 1, ACTION_ALL_LNK, parse_uid_args, uid_action},
 	{ "gid", GID_ACTION, 1, ACTION_ALL_LNK, parse_gid_args, gid_action},
 	{ "guid", GUID_ACTION, 2, ACTION_ALL_LNK, parse_guid_args, guid_action},
-	{ "mode", MODE_ACTION, -2, ACTION_ALL, parse_mode_args, mode_action },
+	{ "mode", MODE_ACTION, -2, ACTION_ALL, action_parse_mode, mode_action },
 	{ "empty", EMPTY_ACTION, -2, ACTION_DIR, parse_empty_args, NULL},
 	{ "move", MOVE_ACTION, 1, ACTION_ALL_LNK, NULL, NULL},
 	{ "prune", PRUNE_ACTION, 0, ACTION_ALL_LNK, NULL, NULL},
-	{ "chmod", MODE_ACTION, -2, ACTION_ALL, parse_mode_args, mode_action },
+	{ "chmod", MODE_ACTION, -2, ACTION_ALL, action_parse_mode, mode_action },
+	{ "xattrs-exclude", XATTR_EXC_ACTION, 1, ACTION_ALL, parse_xattr_args, NULL},
+	{ "xattrs-include", XATTR_INC_ACTION, 1, ACTION_ALL, parse_xattr_args, NULL},
+	{ "xattrs-add", XATTR_ADD_ACTION, 1, ACTION_ALL, parse_xattr_add_args, NULL},
 	{ "noop", NOOP_ACTION, 0, ACTION_ALL, NULL, noop_action },
 	{ "", 0, -1, 0, NULL, NULL}
 };

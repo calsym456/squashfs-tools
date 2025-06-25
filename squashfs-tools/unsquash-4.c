@@ -2,7 +2,8 @@
  * Unsquash a squashfs filesystem.  This is a highly compressed read only
  * filesystem.
  *
- * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2019, 2021
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2019, 2021, 2022, 2023, 2024,
+ * 2025
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -26,6 +27,7 @@
 #include "squashfs_swap.h"
 #include "xattr.h"
 #include "compressor.h"
+#include "alloc.h"
 
 static struct squashfs_fragment_entry *fragment_table;
 static unsigned int *id_table;
@@ -77,10 +79,7 @@ static int read_fragment_table(long long *table_start)
 		sBlk.s.fragment_table_start);
 
 	fragment_table_index = alloc_index_table(indexes);
-	fragment_table = malloc(bytes);
-	if(fragment_table == NULL)
-		MEM_ERROR();
-
+	fragment_table = MALLOC(bytes);
 	res = read_fs_bytes(fd, sBlk.s.fragment_table_start, length,
 							fragment_table_index);
 	if(res == FALSE) {
@@ -119,6 +118,9 @@ static void read_fragment(unsigned int fragment, long long *start_block, int *si
 
 	struct squashfs_fragment_entry *fragment_entry;
 
+	if(fragment >= sBlk.s.fragments)
+		EXIT_UNSQUASH("File system corrupted - fragment index in inode too large (fragment: %u)\n", fragment);
+
 	fragment_entry = &fragment_table[fragment];
 	*start_block = fragment_entry->start_block;
 	*size = fragment_entry->size;
@@ -142,11 +144,29 @@ static struct inode *read_inode(unsigned int start_block, unsigned int offset)
 
 	SQUASHFS_INSWAP_BASE_INODE_HEADER(&header.base);
 
+	if(header.base.uid >= sBlk.s.no_ids)
+		EXIT_UNSQUASH("File system corrupted - uid index in inode too large (uid: %u)\n", header.base.uid);
+
+	if(header.base.guid >= sBlk.s.no_ids)
+		EXIT_UNSQUASH("File system corrupted - gid index in inode too large (gid: %u)\n", header.base.guid);
+
+	if(header.base.inode_type < 1 || header.base.inode_type > 14)
+		EXIT_UNSQUASH("File system corrupted - invalid type in inode (type: %u)\n", header.base.inode_type);
+
+	if(header.base.inode_number > sBlk.s.inodes)
+		EXIT_UNSQUASH("File system corrupted - inode number in inode too large (inode_number: %u)\n", header.base.inode_number);
+
+	if(header.base.inode_number == 0)
+		EXIT_UNSQUASH("File system corrupted - inode number zero is invalid\n");
+
 	i.uid = (uid_t) id_table[header.base.uid];
 	i.gid = (uid_t) id_table[header.base.guid];
 	i.mode = lookup_type[header.base.inode_type] | header.base.mode;
 	i.type = header.base.inode_type;
-	i.time = header.base.mtime;
+	if(time_opt)
+		i.time = timeval;
+	else
+		i.time = header.base.mtime;
 	i.inode_number = header.base.inode_number;
 
 	switch(header.base.inode_type) {
@@ -245,10 +265,10 @@ static struct inode *read_inode(unsigned int start_block, unsigned int offset)
 
 			SQUASHFS_INSWAP_SYMLINK_INODE_HEADER(inode);
 
-			i.symlink = malloc(inode->symlink_size + 1);
-			if(i.symlink == NULL)
-				MEM_ERROR();
+			if(inode->symlink_size > SQUASHFS_SYMLINK_MAX)
+				EXIT_UNSQUASH("File system corrupted - symlink_size in inode too large (symlink_size: %u)\n", inode->symlink_size);
 
+			i.symlink = MALLOC(inode->symlink_size + 1);
 			res = read_inode_data(i.symlink, &start, &offset, inode->symlink_size);
 			if(res == FALSE)
 				EXIT_UNSQUASH("read_inode: failed to read "
@@ -331,7 +351,7 @@ static struct dir *squashfs_opendir(unsigned int block_start, unsigned int offse
 	struct squashfs_dir_entry *dire = (struct squashfs_dir_entry *) buffer;
 	long long start;
 	int bytes = 0, dir_count, size, res;
-	struct dir_ent *new_dir;
+	struct dir_ent *ent, *cur_ent = NULL;
 	struct dir *dir;
 
 	TRACE("squashfs_opendir: inode start block %d, offset %d\n",
@@ -339,12 +359,9 @@ static struct dir *squashfs_opendir(unsigned int block_start, unsigned int offse
 
 	*i = read_inode(block_start, offset);
 
-	dir = malloc(sizeof(struct dir));
-	if(dir == NULL)
-		MEM_ERROR();
-
+	dir = MALLOC(sizeof(struct dir));
 	dir->dir_count = 0;
-	dir->cur_entry = 0;
+	dir->cur_entry = NULL;
 	dir->mode = (*i)->mode;
 	dir->uid = (*i)->uid;
 	dir->guid = (*i)->gid;
@@ -415,29 +432,32 @@ static struct dir *squashfs_opendir(unsigned int block_start, unsigned int offse
 				"%d:%d, type %d\n", dire->name,
 				dirh.start_block, dire->offset, dire->type);
 
-			if((dir->dir_count % DIR_ENT_SIZE) == 0) {
-				new_dir = realloc(dir->dirs, (dir->dir_count +
-					DIR_ENT_SIZE) * sizeof(struct dir_ent));
-				if(new_dir == NULL)
-					MEM_ERROR();
-				dir->dirs = new_dir;
-			}
-
-			strcpy(dir->dirs[dir->dir_count].name, dire->name);
-			dir->dirs[dir->dir_count].start_block =
-				dirh.start_block;
-			dir->dirs[dir->dir_count].offset = dire->offset;
-			dir->dirs[dir->dir_count].type = dire->type;
+			ent = MALLOC(sizeof(struct dir_ent));
+			ent->name = STRDUP(dire->name);
+			ent->start_block = dirh.start_block;
+			ent->offset = dire->offset;
+			ent->type = dire->type;
+			ent->next = NULL;
+			if(cur_ent == NULL)
+				dir->dirs = ent;
+			else
+				cur_ent->next = ent;
+			cur_ent = ent;
 			dir->dir_count ++;
 			bytes += dire->size + 1;
 		}
 	}
 
+	/* check directory for duplicate names and sorting */
+	if(check_directory(dir) == FALSE) {
+		ERROR("File system corrupted: directory has duplicate names or is unsorted\n");
+		goto corrupted;
+	}
+
 	return dir;
 
 corrupted:
-	free(dir->dirs);
-	free(dir);
+	squashfs_closedir(dir);
 	return NULL;
 }
 
@@ -469,12 +489,7 @@ static int read_id_table(long long *table_start)
 	TRACE("read_id_table: no_ids %d\n", sBlk.s.no_ids);
 
 	id_index_table = alloc_index_table(indexes);
-	id_table = malloc(bytes);
-	if(id_table == NULL) {
-		ERROR("read_id_table: failed to allocate id table\n");
-		return FALSE;
-	}
-
+	id_table = MALLOC(bytes);
 	res = read_fs_bytes(fd, sBlk.s.id_table_start, length, id_index_table);
 	if(res == FALSE) {
 		ERROR("read_id_table: failed to read id index table\n");
@@ -554,7 +569,6 @@ static int parse_exports_table(long long *table_start)
 static int read_filesystem_tables()
 {
 	long long table_start;
-	int res;
 
 	/* Read xattrs */
 	if(sBlk.s.xattr_id_table_start != SQUASHFS_INVALID_BLK) {
@@ -564,10 +578,8 @@ static int read_filesystem_tables()
 			goto corrupted;
 		}
 
-		res = read_xattrs_from_disk(fd, &sBlk.s, no_xattrs, &table_start);
-		if(res == 0)
-			goto corrupted;
-		else if(res == -1)
+		sBlk.xattr_ids = read_xattrs_from_disk(fd, &sBlk.s, no_xattrs, &table_start);
+		if(sBlk.xattr_ids == 0)
 			exit(1);
 	} else
 		table_start = sBlk.s.bytes_used;
@@ -628,15 +640,6 @@ static int read_filesystem_tables()
 
 		if(read_fragment_table(&table_start) == FALSE)
 			goto corrupted;
-	} else {
-		/*
-		 * Sanity check super block contents - with 0 fragments,
-		 * the fragment table should be empty
-		 */
-		if(sBlk.s.fragment_table_start != table_start) {
-			ERROR("read_filesystem_tables: fragment table start invalid in super block\n");
-			goto corrupted;
-		}
 	}
 
 	/* Sanity check super block directory table values */
@@ -775,7 +778,7 @@ static void squashfs_stat(char *source)
 		printf("Fragments are %scompressed\n",
 			SQUASHFS_UNCOMPRESSED_FRAGMENTS(sBlk.s.flags) ?
 			"un" : "");
-		printf("Always-use-fragments option is %sspecified\n",
+		printf("Tailends are %spacked into fragments\n",
 			SQUASHFS_ALWAYS_FRAGMENTS(sBlk.s.flags) ? "" : "not ");
 	}
 

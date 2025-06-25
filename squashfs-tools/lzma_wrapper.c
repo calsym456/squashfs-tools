@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2010, 2013
+ * Copyright (c) 2009, 2010, 2012, 2013, 2022, 2024
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -26,6 +26,7 @@
 
 #include "squashfs_fs.h"
 #include "compressor.h"
+#include "print_pager.h"
 
 #define LZMA_HEADER_SIZE	(LZMA_PROPS_SIZE + 8)
 
@@ -108,12 +109,18 @@ static int lzma_uncompress(void *dest, void *src, int size, int outsize,
 }
 
 
+static void lzma_usage(FILE *stream, int cols)
+{
+	autowrap_print(stream, "\t  (no options) (deprecated - no kernel support)\n", cols);
+}
+
+
 struct compressor lzma_comp_ops = {
 	.init = NULL,
 	.compress = lzma_compress,
 	.uncompress = lzma_uncompress,
 	.options = NULL,
-	.usage = NULL,
+	.usage = lzma_usage,
 	.id = LZMA_COMPRESSION,
 	.name = "lzma",
 	.supported = 1

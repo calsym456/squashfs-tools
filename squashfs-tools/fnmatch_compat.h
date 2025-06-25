@@ -1,9 +1,9 @@
-#ifndef FNMATCH_COMPAT
-#define FNMATCH_COMPAT
+#ifndef FNMATCH_COMPAT_H
+#define FNMATCH_COMPAT_H
 /*
  * Squashfs
  *
- * Copyright (c) 2015
+ * Copyright (c) 2015, 2024
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or

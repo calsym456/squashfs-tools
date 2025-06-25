@@ -4,7 +4,7 @@
  * Create a squashfs filesystem.  This is a highly compressed read only
  * filesystem.
  *
- * Copyright (c) 2009, 2010, 2014, 2017, 2021
+ * Copyright (c) 2009, 2010, 2012, 2014, 2017, 2021, 2022, 2023, 2024
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -46,6 +46,7 @@ struct pseudo_stat {
 struct pseudo_file {
 	char		*filename;
 	long long	start;
+	long long	current;
 	int		fd;
 };
 
@@ -53,6 +54,7 @@ struct pseudo_data {
 	struct pseudo_file	*file;
 	long long		offset;
 	long long		length;
+	int			sparse;
 };
 
 struct pseudo_dev {
@@ -75,16 +77,26 @@ struct pseudo_entry {
 	char			*pathname;
 	struct pseudo		*pseudo;
 	struct pseudo_dev	*dev;
+	struct pseudo_xattr	*xattr;
+	struct pseudo_entry	*next;
 };
 	
 struct pseudo {
 	int			names;
-	int			count;
-	struct pseudo_entry	*name;
+	struct pseudo_entry	*current;
+	struct pseudo_entry	*head;
 };
+
+struct pseudo_xattr {
+	int			count;
+	struct xattr_add	*xattr;
+};
+
+extern struct pseudo *pseudo;
 
 extern long long read_bytes(int, void *, long long);
 extern int read_pseudo_definition(char *, char *);
+extern struct pseudo_dev *read_pseudo_dir(char *def);
 extern int read_pseudo_file(char *, char *);
 extern struct pseudo *pseudo_subdir(char *, struct pseudo *);
 extern struct pseudo_entry *pseudo_readdir(struct pseudo *);
@@ -92,4 +104,6 @@ extern struct pseudo_dev *get_pseudo_file(int);
 extern int pseudo_exec_file(struct pseudo_dev *, int *);
 extern struct pseudo *get_pseudo();
 extern void dump_pseudos();
+extern char *get_element(char *, char **, char **);
+extern struct pseudo_entry *pseudo_search(struct pseudo *, char *, char *, char *, int *);
 #endif

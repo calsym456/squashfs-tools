@@ -2,7 +2,7 @@
  * Unsquash a squashfs filesystem.  This is a highly compressed read only
  * filesystem.
  *
- * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2019, 2021
+ * Copyright (c) 2009, 2010, 2011, 2012, 2013, 2019, 2021, 2022, 2023, 2025
  * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * This program is free software; you can redistribute it and/or
@@ -25,6 +25,7 @@
 #include "unsquashfs.h"
 #include "squashfs_compat.h"
 #include "compressor.h"
+#include "alloc.h"
 
 static squashfs_fragment_entry_3 *fragment_table;
 static unsigned int *uid_table, *guid_table;
@@ -37,12 +38,11 @@ static long long *salloc_index_table(int indexes)
 	int length = indexes * sizeof(long long);
 
 	if(alloc_size < length || length == 0) {
-		long long *table = realloc(alloc_table, length);
-
-		if(table == NULL && length !=0 )
-			MEM_ERROR();
-
-		alloc_table = table;
+		if(length == 0) {
+			free(alloc_table);
+			alloc_table = NULL;
+		} else
+			alloc_table = REALLOC(alloc_table, length);
 		alloc_size = length;
 	}
 
@@ -58,9 +58,7 @@ static void read_block_list(unsigned int *block_list, long long start,
 	TRACE("read_block_list: blocks %d\n", blocks);
 
 	if(swap) {
-		unsigned int *block_ptr = malloc(blocks * sizeof(unsigned int));
-		if(block_ptr == NULL)
-			MEM_ERROR();
+		unsigned int *block_ptr = MALLOC(blocks * sizeof(unsigned int));
 		res = read_inode_data(block_ptr, &start, &offset, blocks * sizeof(unsigned int));
 		if(res == FALSE)
 			EXIT_UNSQUASH("read_block_list: failed to read "
@@ -105,10 +103,7 @@ static int read_fragment_table(long long *table_start)
 		sBlk.s.fragment_table_start);
 
 	fragment_table_index = alloc_index_table(indexes);
-	fragment_table = malloc(bytes);
-	if(fragment_table == NULL)
-		EXIT_UNSQUASH("read_fragment_table: failed to allocate "
-			"fragment table\n");
+	fragment_table = MALLOC(bytes);
 
 	if(swap) {
 		long long *sfragment_table_index = salloc_index_table(indexes);
@@ -196,12 +191,34 @@ static struct inode *read_inode(unsigned int start_block, unsigned int offset)
 		EXIT_UNSQUASH("read_inode: failed to read inode %lld:%d\n", st, off);
 
 	i.xattr = SQUASHFS_INVALID_XATTR;
+
+	if(header.base.uid >= sBlk.no_uids)
+		EXIT_UNSQUASH("File system corrupted - uid index in inode too large (uid: %u)\n", header.base.uid);
+
 	i.uid = (uid_t) uid_table[header.base.uid];
-	i.gid = header.base.guid == SQUASHFS_GUIDS ? i.uid :
-		(uid_t) guid_table[header.base.guid];
+
+	if(header.base.guid == SQUASHFS_GUIDS)
+		i.gid = i.uid;
+	else if(header.base.guid >= sBlk.no_guids)
+		EXIT_UNSQUASH("File system corrupted - gid index in inode too large (gid: %u)\n", header.base.guid);
+	else
+		i.gid = (uid_t) guid_table[header.base.guid];
+
+	if(header.base.inode_type < 1 || header.base.inode_type > 9)
+		EXIT_UNSQUASH("File system corrupted - invalid type in inode (type: %u)\n", header.base.inode_type);
+
+	if(header.base.inode_number > sBlk.s.inodes)
+		EXIT_UNSQUASH("File system corrupted - inode number in inode too large (inode_number: %u)\n", header.base.inode_number);
+
+	if(header.base.inode_number == 0)
+		EXIT_UNSQUASH("File system corrupted - inode number zero is invalid\n");
+
 	i.mode = lookup_type[header.base.inode_type] | header.base.mode;
 	i.type = header.base.inode_type;
-	i.time = header.base.mtime;
+	if(time_opt)
+		i.time = timeval;
+	else
+		i.time = header.base.mtime;
 	i.inode_number = header.base.inode_number;
 
 	switch(header.base.inode_type) {
@@ -236,7 +253,7 @@ static struct inode *read_inode(unsigned int start_block, unsigned int offset)
 					SQUASHFS_SWAP_LDIR_INODE_HEADER_3(&header.ldir,
 						&sinode);
 			} else
-				res = read_inode_data(&inode, &start, &offset, sizeof(*inode));
+				res = read_inode_data(inode, &start, &offset, sizeof(*inode));
 
 			if(res == FALSE)
 				EXIT_UNSQUASH("read_inode: failed to read "
@@ -257,7 +274,7 @@ static struct inode *read_inode(unsigned int start_block, unsigned int offset)
 					SQUASHFS_SWAP_REG_INODE_HEADER_3(inode,
 						&sinode);
 			} else
-				res = read_inode_data(&inode, &start, &offset, sizeof(*inode));
+				res = read_inode_data(inode, &start, &offset, sizeof(*inode));
 
 			if(res == FALSE)
 				EXIT_UNSQUASH("read_inode: failed to read "
@@ -326,10 +343,7 @@ static struct inode *read_inode(unsigned int start_block, unsigned int offset)
 				EXIT_UNSQUASH("read_inode: failed to read "
 					"inode %lld:%d\n", start, offset);
 
-			i.symlink = malloc(inodep->symlink_size + 1);
-			if(i.symlink == NULL)
-				MEM_ERROR();
-
+			i.symlink = MALLOC(inodep->symlink_size + 1);
 			res = read_inode_data(i.symlink, &start, &offset, inodep->symlink_size);
 			if(res == FALSE)
 				EXIT_UNSQUASH("read_inode: failed to read "
@@ -381,7 +395,7 @@ static struct dir *squashfs_opendir(unsigned int block_start, unsigned int offse
 	long long start;
 	int bytes = 0;
 	int dir_count, size, res;
-	struct dir_ent *new_dir;
+	struct dir_ent *ent, *cur_ent = NULL;
 	struct dir *dir;
 
 	TRACE("squashfs_opendir: inode start block %d, offset %d\n",
@@ -389,12 +403,9 @@ static struct dir *squashfs_opendir(unsigned int block_start, unsigned int offse
 
 	*i = read_inode(block_start, offset);
 
-	dir = malloc(sizeof(struct dir));
-	if(dir == NULL)
-		MEM_ERROR();
-
+	dir = MALLOC(sizeof(struct dir));
 	dir->dir_count = 0;
-	dir->cur_entry = 0;
+	dir->cur_entry = NULL;
 	dir->mode = (*i)->mode;
 	dir->uid = (*i)->uid;
 	dir->guid = (*i)->gid;
@@ -478,29 +489,32 @@ static struct dir *squashfs_opendir(unsigned int block_start, unsigned int offse
 				"%d:%d, type %d\n", dire->name,
 				dirh.start_block, dire->offset, dire->type);
 
-			if((dir->dir_count % DIR_ENT_SIZE) == 0) {
-				new_dir = realloc(dir->dirs, (dir->dir_count +
-					DIR_ENT_SIZE) * sizeof(struct dir_ent));
-				if(new_dir == NULL)
-					MEM_ERROR();
-				dir->dirs = new_dir;
-			}
-
-			strcpy(dir->dirs[dir->dir_count].name, dire->name);
-			dir->dirs[dir->dir_count].start_block =
-				dirh.start_block;
-			dir->dirs[dir->dir_count].offset = dire->offset;
-			dir->dirs[dir->dir_count].type = dire->type;
+			ent = MALLOC(sizeof(struct dir_ent));
+			ent->name = STRDUP(dire->name);
+			ent->start_block = dirh.start_block;
+			ent->offset = dire->offset;
+			ent->type = dire->type;
+			ent->next = NULL;
+			if(cur_ent == NULL)
+				dir->dirs = ent;
+			else
+				cur_ent->next = ent;
+			cur_ent = ent;
 			dir->dir_count ++;
 			bytes += dire->size + 1;
 		}
 	}
 
+	/* check directory for duplicate names and sorting */
+	if(check_directory(dir) == FALSE) {
+		ERROR("File system corrupted: directory has duplicate names or is unsorted\n");
+		goto corrupted;
+	}
+
 	return dir;
 
 corrupted:
-	free(dir->dirs);
-	free(dir);
+	squashfs_closedir(dir);
 	return NULL;
 }
 
